@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="robots" content="noindex">
+	<!-- The site's own files (config.js, ui.js, ui/*.png) are one folder up. -->
+	<base href="../">
+	<title>Duck Game Admin</title>
+	<link rel="icon" href="data:,">
+	<style>
+		/* The admin page (D-57): the game switch, behind the admin password. It looks like the game's own screens, as the
+		   game page does (ui.js): text in the game's font, in the game's menu box. --f2 is one font pixel (script below). */
+		html, body { margin: 0; min-height: 100%; background: #000; color: #fff; font: 14px ui-monospace, Consolas, monospace; }
+		body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+		:root { --f1: 1px; --f2: 2px; }
+		[hidden] { display: none !important; }
+		.pixels { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+		.hidden-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+		.plain-text { font: bold calc(var(--f2) * 8) ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+		.box { box-sizing: border-box; border: calc(var(--f2) * 10) solid transparent; border-image: url(ui/uiBox.png) 10 fill / calc(var(--f2) * 10) stretch;
+			image-rendering: pixelated; image-rendering: crisp-edges; }
+		#panel { display: flex; flex-direction: column; align-items: flex-start; gap: calc(var(--f2) * 8); margin: 16px; }
+		#row { display: flex; align-items: center; gap: calc(var(--f2) * 8); }
+		/* The switch: a track with a knob, green and to the right while the game is open. */
+		#switch { position: relative; flex: none; width: calc(var(--f2) * 44); height: calc(var(--f2) * 18); padding: 0; border: var(--f2) solid #000;
+			background: #6b2424; box-shadow: inset 0 calc(var(--f2) * -2) 0 rgba(0, 0, 0, 0.35); cursor: pointer; outline: none; }
+		#switch::after { content: ''; position: absolute; top: var(--f2); left: var(--f2); width: calc(var(--f2) * 14); height: calc(var(--f2) * 14);
+			background: #d8d8d8; box-shadow: inset 0 calc(var(--f2) * -2) 0 #8a8a8a; transition: left 0.12s steps(4); }
+		#switch[aria-checked="true"] { background: #2f7a32; }
+		#switch[aria-checked="true"]::after { left: calc(var(--f2) * 27); }
+		#switch:disabled { opacity: 0.5; cursor: wait; }
+		#switch:focus-visible { box-shadow: 0 0 0 var(--f2) #eb8933; }
+		.item { padding: calc(var(--f2) * 2) 0; margin: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+	</style>
+	<script src="config.js"></script>
+</head>
+<body>
+	<div id="panel" class="box" hidden>
+		<div id="title"></div>
+		<div id="row" hidden>
+			<button id="switch" type="button" role="switch" aria-checked="false" aria-labelledby="switch-label"></button>
+			<div id="switch-label"></div>
+		</div>
+		<div id="state"></div>
+		<div id="message"></div>
+		<button id="retry" class="item" type="button" hidden></button>
+	</div>
+	<script type="module">
+		import * as ui from './ui.js';
+		import { adminRequest } from './game-switch.js';
+
+		const panel = document.getElementById('panel');
+		const row = document.getElementById('row');
+		const toggle = document.getElementById('switch');
+		const retry = document.getElementById('retry');
+		const messages = {
+			'wrong-password': 'WRONG PASSWORD.',
+			'rate-limited': 'TOO MANY TRIES. WAIT A MINUTE.',
+			'not-saved': "THE SERVER COULDN'T SAVE IT. TRY AGAIN.",
+			unreachable: "CAN'T REACH THE SERVER.",
+		};
+		let password = '';
+
+		// Whole device pixels per font pixel, so the letters stay sharp: 3 on a wide window, 2 on a phone.
+		function fitFont() {
+			const ratio = window.devicePixelRatio || 1;
+			const pixel = window.innerWidth >= 640 ? 3 : 2;
+			document.documentElement.style.setProperty('--f2', `${Math.max(1, Math.round(pixel * ratio)) / ratio}px`);
+		}
+
+		function say(id, text, color = ui.colors.white) {
+			ui.setText(document.getElementById(id), text, { scale: 2, color, maxChars: 34 });
+		}
+
+		function showMessage(text) {
+			say('message', text, ui.colors.red);
+		}
+
+		function showRetry(label, onClick) {
+			ui.setText(retry, label, { scale: 2, color: ui.colors.menu });
+			retry.onclick = onClick;
+			retry.hidden = false;
+			retry.focus();
+		}
+
+		function render({ enabled, durable }) {
+			row.hidden = false;
+			retry.hidden = true;
+			toggle.setAttribute('aria-checked', String(enabled));
+			say('switch-label', enabled ? 'GAME ON' : 'GAME OFF');
+			say('state', enabled ? 'ANYONE CAN PLAY.' : 'CLOSED: NO ONE CAN PLAY.', enabled ? ui.colors.white : ui.colors.gray);
+			say('message', durable === false ? 'TEST SERVER: NOT KEPT AFTER A RESTART.' : ' ', ui.colors.gray);
+		}
+
+		function describe(error) {
+			return messages[error.message] ?? `SOMETHING WENT WRONG (${error.message}).`.toUpperCase();
+		}
+
+		// The password goes to the server, which checks it; this page only keeps it in memory while it is open.
+		async function signIn() {
+			retry.hidden = true;
+			row.hidden = true;
+			say('state', ' ');
+			say('message', 'CHECKING...', ui.colors.gray);
+			for (;;) {
+				const entered = window.prompt('Duck Game admin password:');
+				if (entered === null) {
+					say('message', 'NO PASSWORD, NO ADMIN.', ui.colors.gray);
+					showRetry('ENTER THE PASSWORD', signIn);
+					return;
+				}
+				try {
+					render(await adminRequest({ password: entered }));
+					password = entered;
+					toggle.focus();
+					return;
+				} catch (error) {
+					if (error.message === 'wrong-password') {
+						window.alert('Wrong password.');
+						continue;
+					}
+					showMessage(describe(error));
+					showRetry('TRY AGAIN', signIn);
+					return;
+				}
+			}
+		}
+
+		toggle.addEventListener('click', async () => {
+			const enabled = toggle.getAttribute('aria-checked') !== 'true';
+			toggle.disabled = true;
+			say('message', 'SAVING...', ui.colors.gray);
+			try {
+				render(await adminRequest({ password, enabled }));
+			} catch (error) {
+				showMessage(describe(error));
+				if (error.message === 'wrong-password') {
+					showRetry('ENTER THE PASSWORD', signIn);
+				}
+			} finally {
+				toggle.disabled = false;
+			}
+		});
+
+		fitFont();
+		window.addEventListener('resize', fitFont);
+		await ui.ready;
+		say('title', 'DUCK GAME ADMIN');
+		panel.hidden = false;
+		signIn();
+	</script>
+</body>
+</html>

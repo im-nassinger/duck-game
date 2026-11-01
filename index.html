@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+	<title>Duck Game</title>
+	<!-- An installable app (D-58): the manifest, its icons, and sw.js (registered by main.js). -->
+	<link rel="manifest" href="manifest.webmanifest">
+	<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+	<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+	<meta name="theme-color" content="#000000">
+	<meta name="mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-status-bar-style" content="black">
+	<meta name="apple-mobile-web-app-title" content="Duck Game">
+	<style>
+		/* The page's screens look like the game's own (ui.js, D-52). Sizes are game pixels of a 1280 x 720 screen fitted
+		   to the window: --u is one of them in CSS pixels, --f1 to --f4 one font pixel at that text scale (main.js, fitUi). */
+		html, body { margin: 0; width: 100%; height: 100%; background: #000; color: #fff; font: 14px ui-monospace, Consolas, monospace; overflow: hidden; }
+		/* Everything on the page. On a touch screen held upright, main.js (layoutApp) turns it a quarter turn and sizes it
+		   to the screen's long side, so the game always shows in landscape and fills the screen (D-55). The page's fixed
+		   elements are inside it, so they turn with it. */
+		#app { position: fixed; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; }
+		body.rotated #app { transform-origin: 0 0; }
+		:root { --u: 1px; --f1: 1px; --f2: 2px; --f3: 3px; --f4: 4px; }
+		/* The canvas fills the window at the game's aspect ratio; main.js sets its CSS size (fitCanvas). The dialog sits
+		   in #screen, on top of the canvas and the same size. */
+		#stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+		#frame { position: relative; }
+		canvas { display: block; outline: none; }
+		#canvas { background: #000; image-rendering: pixelated; image-rendering: crisp-edges; }
+		#screen { position: absolute; inset: 0; pointer-events: none; }
+		#screen > * { pointer-events: auto; }
+		[hidden] { display: none !important; }
+
+		.pixels { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+		.hidden-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+		.plain-text { font: bold calc(var(--f2) * 8) ui-monospace, Consolas, monospace; white-space: pre-wrap; }
+		/* The game's menu box: uiBox.png, 10-pixel corners and edges, drawn at twice its size. */
+		.box { box-sizing: border-box; border: calc(var(--f2) * 10) solid transparent; border-image: url(ui/uiBox.png) 10 fill / calc(var(--f2) * 10) stretch;
+			image-rendering: pixelated; image-rendering: crisp-edges; }
+		/* A menu choice: the menu colour, and the game's arrow in front of the selected one. */
+		.item { display: flex; align-items: center; gap: calc(var(--f2) * 4); padding: calc(var(--f2) * 2) calc(var(--f2) * 2) calc(var(--f2) * 2) 0;
+			margin: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; outline: none; }
+		.item::before { content: ''; flex: none; width: calc(var(--f2) * 8); height: calc(var(--f2) * 7); background: url(ui/contextArrowRight.png) 0 0 / 100% 100%;
+			image-rendering: pixelated; visibility: hidden; }
+		.item.selected::before { visibility: visible; }
+
+		/* MonoMain's loading screen: the message, a red bar 50 pixels from the edges, the running duck above its right end.
+		   It covers the window, laid out on a 16:9 screen, and stays up until the game's title screen (main.js). */
+		#loader { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; }
+		#loader-screen { position: relative; flex: none; width: calc(var(--u) * 1280); height: calc(var(--u) * 720); }
+		#loader.stopped { background: rgba(0, 0, 0, 0.85); }
+		#loader.stopped #loader-screen { display: flex; align-items: center; justify-content: center; }
+		#panel { display: contents; }
+		#status { position: absolute; left: calc(var(--u) * 50); bottom: calc(var(--u) * 58); }
+		#progress { position: absolute; left: calc(var(--u) * 50); right: calc(var(--u) * 50); bottom: calc(var(--u) * 30); height: calc(var(--u) * 20);
+			background: #111; overflow: hidden; }
+		#progress-fill { width: 100%; height: 100%; background: #f00; transform-origin: 0 0; transform: scaleX(0); }
+		#duck { position: absolute; right: calc(var(--u) * 50); bottom: calc(var(--u) * 55); width: calc(var(--u) * 128); height: calc(var(--u) * 128); overflow: hidden; }
+		/* A transform animation runs off the main thread, so the duck keeps running while the game's start-up blocks it. */
+		#duck-run { display: block; width: 600%; height: 100%; image-rendering: pixelated; image-rendering: crisp-edges; animation: duck-run 0.6s steps(6) infinite; }
+		@keyframes duck-run { to { transform: translateX(-100%); } }
+		/* Until ui.js has drawn its frames, the image has no src, and browsers draw an empty sized image as a thin outline. */
+		#duck-run:not([src]) { visibility: hidden; }
+		#loader.stopped #progress, #loader.stopped #duck { display: none; }
+		#loader.stopped #panel { display: flex; flex-direction: column; align-items: flex-start; gap: calc(var(--f2) * 6); max-width: 90%; max-height: 90%;
+			min-width: calc(var(--f2) * 180); }
+		#loader.stopped #status { position: static; }
+		#crash { margin: 0; max-width: calc(var(--u) * 1000); max-height: calc(var(--u) * 360); overflow: auto; white-space: pre-wrap; user-select: text;
+			font: calc(var(--u) * 13) / 1.35 ui-monospace, Consolas, monospace; color: #ff8b80; }
+
+		/* In the window's top-left corner, out of the game's way: the sound hint, faint, fading further after a few seconds. */
+		#sound { position: fixed; left: calc(var(--u) * 8); top: calc(var(--u) * 8); display: flex; align-items: center; gap: calc(var(--f1) * 6);
+			padding: calc(var(--f1) * 4); background: rgba(0, 0, 0, 0.5); pointer-events: none; opacity: 0.7; transition: opacity 1.5s; }
+		#sound.faded { opacity: 0.3; }
+
+		/* The page's dialog for the game's file dialogs: a menu box with the question, a name field, and the choices. */
+		#dialog { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: flex; flex-direction: column; gap: calc(var(--f2) * 6);
+			min-width: calc(var(--f2) * 200); max-width: 90%; }
+		#dialog .buttons { display: flex; flex-direction: column; align-items: flex-start; }
+		#dialog-field { position: relative; width: calc(var(--f2) * 8 * 32); padding: calc(var(--f2) * 3); background: #080c10; box-shadow: 0 0 0 var(--f2) #2f494f; cursor: text; }
+		#dialog-field .pixels { min-height: calc(var(--f2) * 8); }
+		/* The caret, after character --caret; hidden while text is selected. */
+		#dialog-field::after { content: ''; position: absolute; top: calc(var(--f2) * 3); left: calc(var(--f2) * (3 + 8 * var(--caret, 0)));
+			width: var(--f2); height: calc(var(--f2) * 8); background: #fff; animation: caret 1s steps(1) infinite; }
+		#dialog-field.has-selection::after, #dialog-field:not(:focus-within)::after { display: none; }
+		@keyframes caret { 50% { opacity: 0; } }
+		#dialog-name { position: absolute; inset: 0; width: 100%; height: 100%; box-sizing: border-box; margin: 0; padding: 0 calc(var(--f2) * 3); border: 0; outline: none;
+			background: transparent; color: transparent; caret-color: transparent; font: calc(var(--f2) * 8) ui-monospace, Consolas, monospace; }
+		#dialog-name::selection { background: transparent; color: transparent; }
+		#dialog-name.plain-input { position: static; color: #fff; caret-color: #fff; background: #080c10; }
+
+		/* On-screen controls for touch screens (touch.js, D-53): an Xbox controller's A, B, X, Y diamond on the right, LB and
+		   RB in the top corners with START below LB, a joystick (the d-pad) that appears under a thumb on the left half,
+		   and up/down slides for a thumb on the right half (jump, crouch). The buttons are the game's own Xbox glyphs
+		   (ui/glyph-*.png). Sized for thumbs (--b), not by the game's pixels, and kept clear of the phone's notch and
+		   rounded corners. */
+		#touch { position: fixed; inset: 0; touch-action: none; user-select: none; -webkit-user-select: none;
+			-webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+			/* The same distance from both sides of the phone's screen: the larger notch inset on both sides, plus, on the
+			   side away from it, the strip beside the camera that the phone left out of the browser's window (main.js
+			   fitEdges sets --gap-left/--gap-right). */
+			--edge: max(16px, env(safe-area-inset-left), env(safe-area-inset-right));
+			--left: calc(var(--edge) + var(--gap-right, 0px)); --right: calc(var(--edge) + var(--gap-left, 0px));
+			--bottom: max(14px, env(safe-area-inset-bottom)); --top: max(8px, env(safe-area-inset-top));
+			/* The diamond: button size, distance from its centre, and its centre's distance from the right and bottom. */
+			--s: calc(var(--b) * 1.15); --d: calc(var(--b) * 1.05);
+			--cx: calc(var(--right) + var(--b) * 1.65); --cy: calc(var(--bottom) + var(--b) * 1.65); }
+		/* Every button is just its glyph, with no box behind it; the button's area (its size below) still takes the touch. */
+		#touch .pad { position: absolute; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+			opacity: 0.6; transition: opacity 0.08s, transform 0.08s; }
+		#touch .pad.held { opacity: 1; transform: scale(0.9); }
+		#touch .icon { display: block; image-rendering: pixelated; image-rendering: crisp-edges; pointer-events: none; -webkit-user-drag: none; }
+		/* A face button's glyph is drawn big. */
+		#touch .pad.face { width: var(--s); height: var(--s); }
+		#touch .face .icon { width: 100%; height: 100%; }
+		#pad-a, #pad-y { right: calc(var(--cx) - var(--s) / 2); }
+		#pad-a { bottom: calc(var(--cy) - var(--d) - var(--s) / 2); }
+		#pad-y { bottom: calc(var(--cy) + var(--d) - var(--s) / 2); }
+		#pad-x, #pad-b { bottom: calc(var(--cy) - var(--s) / 2); }
+		#pad-x { right: calc(var(--cx) + var(--d) - var(--s) / 2); }
+		#pad-b { right: calc(var(--cx) - var(--d) - var(--s) / 2); }
+		/* The bumpers in the top corners; START below LB, with a white icon. */
+		#pad-lb, #pad-rb { top: var(--top); width: calc(var(--b) * 1.3); height: calc(var(--b) * 0.95); }
+		#pad-lb { left: var(--left); }
+		#pad-rb { right: var(--right); }
+		#pad-lb .icon, #pad-rb .icon { width: calc(var(--b) * 0.7); height: calc(var(--b) * 0.7); }
+		#pad-start { left: var(--left); top: calc(var(--top) + var(--b) * 1.1); width: calc(var(--b) * 1.3); height: calc(var(--b) * 0.75); }
+		#pad-start .icon { width: calc(var(--b) / 20 * 11); height: calc(var(--b) / 20 * 9); }
+		/* The joystick, centred where the left thumb landed (touch.js sets left and top); the knob follows the thumb. */
+		#stick { position: absolute; display: none; width: calc(var(--b) * 2.2); height: calc(var(--b) * 2.2); transform: translate(-50%, -50%);
+			box-sizing: border-box; border: calc(var(--b) / 10) solid transparent; border-image: url(ui/uiBox.png) 10 fill / calc(var(--b) / 10) stretch;
+			image-rendering: pixelated; image-rendering: crisp-edges; opacity: 0.55; pointer-events: none; }
+		#stick.active { display: block; }
+		#stick-knob { position: absolute; left: 50%; top: 50%; width: calc(var(--b) * 0.9); height: calc(var(--b) * 0.9); margin: calc(var(--b) * -0.45);
+			background: url(ui/glyph-stick.png) 0 0 / 100% 100%; image-rendering: pixelated; image-rendering: crisp-edges; }
+		/* What the thumbs do, for a few seconds when the controls first show. */
+		#touch-hint { position: absolute; left: 50%; top: 28%; transform: translateX(-50%); display: flex; flex-direction: column; gap: calc(var(--b) / 8);
+			padding: calc(var(--b) / 6) calc(var(--b) / 4); background: rgba(0, 0, 0, 0.65); pointer-events: none; opacity: 0; transition: opacity 0.6s;
+			--hint-px: calc(var(--b) / 32); }
+		#touch-hint.shown { opacity: 1; }
+		#touch-hint > div { display: flex; align-items: center; gap: calc(var(--hint-px) * 5); }
+		#touch-hint img { width: calc(var(--hint-px) * 14); height: calc(var(--hint-px) * 14); image-rendering: pixelated; image-rendering: crisp-edges; }
+		/* On a touch screen: the controls' size, the sound hint in the top middle (LB and START have the top left), and no
+		   controls while the page's dialog is open. */
+		body.touch-mode { --b: clamp(56px, 18vmin, 104px); }
+		body.touch-mode #sound { left: 50%; transform: translateX(-50%); top: max(8px, env(safe-area-inset-top)); }
+		body.dialog-open #touch { display: none; }
+
+		#log { position: fixed; left: 0; right: 0; bottom: 0; height: 140px; margin: 0; overflow: auto; background: rgba(20, 20, 20, 0.9);
+			padding: 8px; box-sizing: border-box; font: 12px ui-monospace, Consolas, monospace; white-space: pre-wrap; color: #ddd; }
+		.error { color: #ff7b72; }
+	</style>
+</head>
+<body>
+<div id="app">
+	<div id="stage">
+		<div id="frame">
+			<canvas id="canvas" width="1280" height="720" tabindex="0"></canvas>
+			<div id="screen">
+				<div id="dialog" class="ui box" hidden>
+					<div id="dialog-text"></div>
+					<div id="dialog-field" hidden>
+						<input id="dialog-name" type="text" spellcheck="false" autocomplete="off">
+					</div>
+					<div class="buttons">
+						<button id="dialog-ok" class="item" tabindex="-1"></button>
+						<button id="dialog-cancel" class="item" tabindex="-1"></button>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div id="loader" class="ui">
+		<div id="loader-screen">
+			<div id="panel" class="box">
+				<div id="status"></div>
+				<pre id="crash" hidden></pre>
+				<button id="action" class="item" hidden></button>
+			</div>
+			<div id="progress"><div id="progress-fill"></div></div>
+			<div id="duck"><img id="duck-run" alt=""></div>
+		</div>
+	</div>
+	<div id="sound" hidden><span id="sound-icon"></span><span id="sound-text"></span></div>
+	<div id="touch" class="ui" hidden>
+		<div id="stick"><div id="stick-knob"></div></div>
+		<div id="pad-lb" class="pad" data-pad="leftShoulder" data-glyph="lb" aria-label="Strafe"></div>
+		<div id="pad-rb" class="pad" data-pad="rightShoulder" data-glyph="rb" aria-label="Ragdoll"></div>
+		<div id="pad-y" class="pad face" data-pad="y" data-glyph="y" aria-label="Grab or drop"></div>
+		<div id="pad-x" class="pad face" data-pad="x" data-glyph="x" aria-label="Fire"></div>
+		<div id="pad-b" class="pad face" data-pad="b" data-glyph="b" aria-label="Quack (back in menus)"></div>
+		<div id="pad-a" class="pad face" data-pad="a" data-glyph="a" aria-label="Jump (OK in menus)"></div>
+		<div id="pad-start" class="pad" data-pad="start" data-glyph="menu" aria-label="Start (pause)"></div>
+		<div id="touch-hint">
+			<div><img src="ui/glyph-stick.png" alt=""><span id="hint-move"></span></div>
+			<div><img src="ui/glyph-a.png" alt=""><span id="hint-tap"></span></div>
+			<div><img src="ui/glyph-down.png" alt=""><span id="hint-down"></span></div>
+		</div>
+	</div>
+	<pre id="log" hidden></pre>
+</div>
+	<script src="./config.js"></script>
+	<script type="module" src="./main.js"></script>
+</body>
+</html>
